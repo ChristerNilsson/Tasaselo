@@ -16,12 +16,20 @@ NO_COLOR = 0
 WHITE = 1
 BLACK = 2
 NO_COLOR_CHOICE = 9
+DEFAULT_RATING_COEFFICIENT = 100
+RATING_DIFFERENCE_LIMITS = [
+    4, 11, 18, 26, 33, 40, 47, 54, 62, 69, 77, 84, 92, 99, 107, 114,
+    122, 130, 138, 146, 154, 163, 171, 180, 189, 198, 207, 216, 226,
+    236, 246, 257, 268, 279, 291, 303, 316, 329, 345, 358, 375, 392,
+    412, 433, 457, 485, 518, 560, 620, 736, 999,
+]
 
 
 @dataclass
 class GameRecord:
     opponent_no: int = 0
     color: int = NO_COLOR
+    score: float | None = None
 
 
 @dataclass
@@ -90,6 +98,117 @@ def build_round_pairings(
         enforce_color_rule=enforce_color_rule,
         max_attempts_before_relaxing_colors=max_attempts_before_relaxing_colors,
     )
+
+
+def apply_round_results(
+    players: Iterable[PlayerState],
+    pairings: Iterable[Pairing],
+    results_by_board: dict[int, tuple[float, float]],
+    *,
+    update_ratings: bool = True,
+    rating_coefficient: int = DEFAULT_RATING_COEFFICIENT,
+) -> list[PlayerState]:
+    """Append one round of opponent/color/result history to the players.
+
+    `results_by_board` maps board number to `(white_score, black_score)`.
+    Examples:
+        `{1: (1.0, 0.0)}` means White won on board 1.
+        `{1: (0.5, 0.5)}` means draw on board 1.
+        `{1: (0.0, 1.0)}` means Black won on board 1.
+    """
+
+    updated_players = [
+        PlayerState(
+            player_no=player.player_no,
+            rating=player.rating,
+            active=player.active,
+            previous_games=list(player.previous_games),
+        )
+        for player in players
+    ]
+    players_by_no = {player.player_no: player for player in updated_players}
+
+    for pairing in pairings:
+        if pairing.board_no not in results_by_board:
+            raise ValueError(f"Missing result for board {pairing.board_no}.")
+
+        white_score, black_score = results_by_board[pairing.board_no]
+        if white_score + black_score != 1.0:
+            raise ValueError(
+                f"Board {pairing.board_no} result must sum to 1.0, "
+                f"got {white_score + black_score}."
+            )
+
+        white_player = players_by_no[pairing.white_player_no]
+        black_player = players_by_no[pairing.black_player_no]
+        white_player.previous_games.append(
+            GameRecord(
+                opponent_no=pairing.black_player_no,
+                color=WHITE,
+                score=white_score,
+            )
+        )
+        black_player.previous_games.append(
+            GameRecord(
+                opponent_no=pairing.white_player_no,
+                color=BLACK,
+                score=black_score,
+            )
+        )
+
+        if update_ratings:
+            white_rating = white_player.rating
+            black_rating = black_player.rating
+            white_player.rating = updated_rating(
+                white_score,
+                white_rating,
+                black_rating,
+                rating_coefficient=rating_coefficient,
+            )
+            black_player.rating = updated_rating(
+                black_score,
+                black_rating,
+                white_rating,
+                rating_coefficient=rating_coefficient,
+            )
+
+    return updated_players
+
+
+def expected_score(rating1: int, rating2: int) -> float:
+    rating_difference = abs(rating1 - rating2)
+    index = 0
+    for index, limit in enumerate(RATING_DIFFERENCE_LIMITS):
+        if rating_difference < limit:
+            break
+        if rating1 > rating2 and index > 41:
+            break
+    sign = 1 if rating1 > rating2 else -1 if rating1 < rating2 else 0
+    return (50 + sign * index) / 100
+
+
+def updated_rating(
+    score: float,
+    rating1: int,
+    rating2: int,
+    *,
+    rating_coefficient: int = DEFAULT_RATING_COEFFICIENT,
+) -> int:
+    rating_difference = abs(rating1 - rating2)
+    index = 0
+    for index, limit in enumerate(RATING_DIFFERENCE_LIMITS):
+        if rating_difference < limit:
+            break
+    sign = 1 if rating1 > rating2 else -1 if rating1 < rating2 else 0
+    expected_score_percent = 50 + sign * index
+    rating_change = (10 * int(score * 10) - expected_score_percent) * rating_coefficient
+    return round_half_away_from_zero(rating1 + rating_change / 100)
+
+
+def round_half_away_from_zero(value: float) -> int:
+    if value >= 0:
+        return int(value + 0.5)
+    return int(value - 0.5)
 
 
 def build_first_round_pairings(
@@ -566,3 +685,4 @@ BalanceColors = balance_colors
 SelectColorByRating = select_color_by_rating
 MakePair = make_pair
 UndoPair = undo_pair
+ApplyRoundResults = apply_round_results
